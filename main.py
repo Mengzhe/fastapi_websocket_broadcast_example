@@ -5,20 +5,22 @@ import websockets
 import json
 
 from typing import *
-# import yfinance
-from fastapi import FastAPI, Request, Depends, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, Depends, BackgroundTasks
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-# from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 from pydantic import BaseModel
 import datetime
 import time
 
+from collections import defaultdict
+
 class CustomMessage(BaseModel):
     value: Union[int, str]
     timestamp: str
+    type: str
 
 
 templates = Jinja2Templates(directory="templates")
@@ -26,7 +28,7 @@ templates = Jinja2Templates(directory="templates")
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-value = 0
+
 
 class WS_Manager:
 
@@ -46,9 +48,10 @@ class WS_Manager:
         self.map_ws_to_idx.update({id(websocket): ws_idx})
         self.message_queues.update({ws_idx: asyncio.Queue(maxsize=self.DEFAULT_MAX_QUEUE_SIZE)})
         message = CustomMessage(value=f"{ws_idx} joins.",
-                                timestamp=str(time_now))
+                                timestamp=str(time_now),
+                                type="message")
         self.idx_counter += 1
-        await self.broadcast(message)
+        # await self.broadcast(message)
         await self.broadcast_to_queues(message)
         return ws_idx, self.message_queues[ws_idx]
 
@@ -59,7 +62,8 @@ class WS_Manager:
 
         ws_idx = self.map_ws_to_idx.get(id(websocket))
         message = CustomMessage(value=f"ws_idx: {ws_idx} leaves.",
-                                timestamp=str(time_now))
+                                timestamp=str(time_now),
+                                type="message")
 
         if ws_idx in self.connections:
             del self.connections[ws_idx]
@@ -70,12 +74,11 @@ class WS_Manager:
         if ws_idx in self.message_queues:
             del self.message_queues[ws_idx]
 
-        await self.broadcast(message)
-        await self.broadcast_to_queues(message)
-        print("message", message)
-
         try:
             await websocket.close()
+            # await self.broadcast(message)
+            await self.broadcast_to_queues(message)
+            print("message", message)
 
         except Exception as e:
             print(e)
@@ -102,20 +105,35 @@ class WS_Manager:
         for wsidx, ws in self.connections.items():
             queue = self.message_queues[wsidx]
             try:
-                await asyncio.wait_for(queue.put(message),
-                                       timeout=0.1)
-            except asyncio.TimeoutError:
-                print(f"{wsidx} timeout")
-                # expired_connections.add(wsidx)
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                print(f"wsidx: {wsidx} queue is full.")
 
         for key, value in self.message_queues.items():
             print("key", key, "value", value)
 
-        # for wsidx in expired_connections:
-        #     await self.remove(self.connections[wsidx])
-        # print("living connections", self.connections)
-
 manager = WS_Manager()
+
+# value = 0
+myData: Dict[str, int] = defaultdict(int)
+# myData[str(datetime.datetime.now())] = value
+# value += 1
+
+async def producer(manager: WS_Manager):
+    value = 0
+    print("producer starts...")
+    while True:
+        message = CustomMessage(value=value,
+                                timestamp=str(datetime.datetime.now()),
+                                type="message")
+        await manager.broadcast_to_queues(message)
+        value += 1
+        await asyncio.sleep(5)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(producer(manager))
+
 
 @app.get('/')
 async def index(request: Request):
@@ -125,28 +143,30 @@ async def index(request: Request):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     ws_idx, queue = await manager.accept(websocket)
-
     while True:
-        message = CustomMessage(value=ws_idx,
-                                timestamp=str(datetime.datetime.now()))
-        # TODO: get message from message queue
+        # fetch message from message queues
         try:
-            await websocket.send_json(message.dict())
+            message = await asyncio.wait_for(queue.get(), timeout=0.2)
+            queue.task_done()
+            try:
+                await websocket.send_json(message.dict())
+                # print("message", message)
+                await asyncio.sleep(2)
+            except (WebSocketDisconnect, websockets.exceptions.ConnectionClosedOK):
+                await manager.remove(websocket)
+                return
+        # if there is no message in the queue
+        except asyncio.TimeoutError:
+            # send a ping to check the connection
+            try:
+                await websocket.send_json({'type': 'ping'})
+                # print("ping sent")
+                recv = await asyncio.wait_for(websocket.receive_json(),
+                                              timeout=0.2)
+                # print("recv", recv)
+
+            except (asyncio.TimeoutError, WebSocketDisconnect, websockets.exceptions.ConnectionClosedOK) as e:
+                await manager.remove(websocket)
+                return
+
             await asyncio.sleep(2)
-
-        # except (websockets.exceptions.ConnectionClosedOK,
-        #         websockets.exceptions.ConnectionClosedError,
-        #         WebSocketDisconnect) as e:
-        #     print("WebSocketDisconnect", e)
-        #     await manager.remove(websocket)
-        #     break
-
-        except:
-            await manager.remove(websocket)
-            break
-
-
-
-
-
-
