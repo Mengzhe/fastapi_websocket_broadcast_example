@@ -89,11 +89,11 @@ class WS_Manager:
             return
 
         expired_connections = []
-        for wsidx, ws in self.connections.items():
+        for ws_idx, ws in self.connections.items():
             try:
                 await ws.send_json(message.dict())
             except:
-                expired_connections.append((wsidx, ws))
+                expired_connections.append((ws_idx, ws))
 
 
         if len(expired_connections)>0:
@@ -102,12 +102,15 @@ class WS_Manager:
 
     async def broadcast_to_queues(self, message: CustomMessage):
         # expired_connections = set()
-        for wsidx, ws in self.connections.items():
-            queue = self.message_queues[wsidx]
+        for ws_idx, ws in self.connections.items():
+            queue = self.message_queues[ws_idx]
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                print(f"wsidx: {wsidx} queue is full.")
+                # when the queue is full, drop the old data and append the new one
+                print(f"ws_idx: {ws_idx} queue is full. Dropping data.")
+                queue.get_nowait()
+                queue.task_done()
 
         for key, value in self.message_queues.items():
             print("key", key, "value", value)
@@ -128,7 +131,7 @@ async def producer(manager: WS_Manager):
                                 type="message")
         await manager.broadcast_to_queues(message)
         value += 1
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
 
 @app.on_event("startup")
 async def startup_event():
