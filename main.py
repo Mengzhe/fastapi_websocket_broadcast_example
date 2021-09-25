@@ -37,8 +37,10 @@ class WS_Manager:
         self.map_ws_to_idx: Dict[int, int] = {}
         self.idx_counter: int = 0
         self.message_queues: Dict[int, asyncio.Queue] = {}
-        self.DEFAULT_MAX_QUEUE_SIZE = 5
         self.tasks = set()
+
+        self.DEFAULT_MAX_QUEUE_SIZE = 5
+        self.TASKS_LIMIT = 5 # every client has at most TASKS_LIMIT number of ongoing resend tasks
 
     async def accept(self, websocket: WebSocket):
         await websocket.accept()
@@ -121,20 +123,20 @@ class WS_Manager:
                 queue.task_done()
                 queue.put_nowait(message)
 
-                if len(self.tasks)>5:
+                # every client has at most TASKS_LIMIT number of ongoing resend tasks
+                # when there are already enough tasks
+                # we need to wait for one to be finished
+                if len(self.tasks)>self.TASKS_LIMIT:
                     done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
-                    print("done", done)
-                    print("pending", pending)
+                    # print("done", done)
+                    # print("pending", pending)
                     self.tasks = pending
-                #
+                # create a new resend task for this client
                 print(f"ws_idx: {ws_idx} queue is full. Task created: Resend message " +
                       f"{message_to_resend.value}, {message_to_resend.timestamp}")
-                # print("len(self.tasks)", len(self.tasks))
                 task = asyncio.create_task(self.resend(ws_idx=ws_idx,
                                                        message=message_to_resend))
                 self.tasks.add(task)
-
-                # print("queue", queue)
 
         # for key, value in self.message_queues.items():
         #     print("key", key, "value", value)
