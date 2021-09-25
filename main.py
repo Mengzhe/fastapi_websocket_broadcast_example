@@ -111,12 +111,6 @@ class WS_Manager:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
 
-                # # when the queue is full, drop the old data and append the new one
-                # dropping_message: CustomMessage = queue.get_nowait()
-                # print(f"ws_idx: {ws_idx} queue is full. Dropping data: " +
-                #       f"{dropping_message.value}, {dropping_message.timestamp}")
-                # queue.task_done()
-
                 # when the queue is full, remove the old data and create a task to resend it later
                 message_to_resend: CustomMessage = queue.get_nowait()
                 message_to_resend.type = "resent message"
@@ -138,16 +132,13 @@ class WS_Manager:
                                                        message=message_to_resend))
                 self.tasks.add(task)
 
-        # for key, value in self.message_queues.items():
-        #     print("key", key, "value", value)
-
     async def resend(self, ws_idx: int, message: CustomMessage, counter: int = 5):
         if ws_idx not in self.message_queues:
             return
 
         queue = self.message_queues[ws_idx]
-
-        # while True:
+        # every resend message will be retried for 'counter' times
+        # the message will be dropped after those retries
         for c in range(counter):
             try:
                 # print(f"ws_idx: {ws_idx}, queue.qsize: {queue.qsize()}")
@@ -175,7 +166,6 @@ async def producer(manager: WS_Manager):
         message = CustomMessage(value=value,
                                 timestamp=str(datetime.datetime.now()),
                                 type="message")
-        # print("message", message)
         await manager.broadcast_to_queues(message)
         # manager.broadcast_to_queues(message)
         value += 1
