@@ -9,15 +9,26 @@ ws.onmessage = function(event) {
     var message = document.createElement('li');
     var content = document.createTextNode(event.data);
     parsed_content = JSON.parse(event.data);
-    console.log("type", parsed_content['type']);
+//    console.log("type", parsed_content['type']);
     type = parsed_content['type'];
+//    console.log(event.data);
 
     if (type === 'ping') {
         ws.send(JSON.stringify({'type': 'pong'}));
     }
-    else if (type === 'message') {
-        //    console.log(event.data);
+//    else if (type === 'message') {
+//        //    console.log(event.data);
+//        message.appendChild(content);
+//        messages.appendChild(message);
+//    }
+//    else if (type === 'resent message') {
+//        //    console.log(event.data);
+//        message.appendChild(content);
+//        messages.appendChild(message);
+//    }
+     else {
+        console.log(event.data);
         message.appendChild(content);
         messages.appendChild(message);
-    }
-    };
+     }
+};

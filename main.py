@@ -17,6 +17,7 @@ import time
 
 from collections import defaultdict
 
+
 class CustomMessage(BaseModel):
     value: Union[int, str]
     timestamp: str
@@ -29,7 +30,6 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-
 class WS_Manager:
 
     def __init__(self):
@@ -38,6 +38,7 @@ class WS_Manager:
         self.idx_counter: int = 0
         self.message_queues: Dict[int, asyncio.Queue] = {}
         self.DEFAULT_MAX_QUEUE_SIZE = 5
+        self.tasks = set()
 
     async def accept(self, websocket: WebSocket):
         await websocket.accept()
@@ -47,12 +48,14 @@ class WS_Manager:
         self.connections.update({ws_idx: websocket})
         self.map_ws_to_idx.update({id(websocket): ws_idx})
         self.message_queues.update({ws_idx: asyncio.Queue(maxsize=self.DEFAULT_MAX_QUEUE_SIZE)})
+        # self.message_queues.update({ws_idx: asyncio.Queue()})
         message = CustomMessage(value=f"{ws_idx} joins.",
                                 timestamp=str(time_now),
                                 type="message")
         self.idx_counter += 1
         # await self.broadcast(message)
         await self.broadcast_to_queues(message)
+        # self.broadcast_to_queues(message)
         return ws_idx, self.message_queues[ws_idx]
 
     async def remove(self, websocket: WebSocket):
@@ -78,14 +81,14 @@ class WS_Manager:
             await websocket.close()
             # await self.broadcast(message)
             await self.broadcast_to_queues(message)
-            print("message", message)
+            # self.broadcast_to_queues(message)
+            # print("message", message)
 
         except Exception as e:
             print(e)
 
-
     async def broadcast(self, message: CustomMessage):
-        if len(self.connections)==0:
+        if len(self.connections) == 0:
             return
 
         expired_connections = []
@@ -95,10 +98,8 @@ class WS_Manager:
             except:
                 expired_connections.append((ws_idx, ws))
 
-
-        if len(expired_connections)>0:
-            print("expired_connections", expired_connections)
-
+        # if len(expired_connections)>0:
+        #     print("expired_connections", expired_connections)
 
     async def broadcast_to_queues(self, message: CustomMessage):
         # expired_connections = set()
@@ -107,20 +108,63 @@ class WS_Manager:
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                # when the queue is full, drop the old data and append the new one
-                print(f"ws_idx: {ws_idx} queue is full. Dropping data.")
-                queue.get_nowait()
-                queue.task_done()
 
-        for key, value in self.message_queues.items():
-            print("key", key, "value", value)
+                # # when the queue is full, drop the old data and append the new one
+                # dropping_message: CustomMessage = queue.get_nowait()
+                # print(f"ws_idx: {ws_idx} queue is full. Dropping data: " +
+                #       f"{dropping_message.value}, {dropping_message.timestamp}")
+                # queue.task_done()
+
+                # when the queue is full, remove the old data and create a task to resend it later
+                message_to_resend: CustomMessage = queue.get_nowait()
+                message_to_resend.type = "resent message"
+                queue.task_done()
+                queue.put_nowait(message)
+
+                if len(self.tasks)>5:
+                    done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
+                    print("done", done)
+                    print("pending", pending)
+                    self.tasks = pending
+                #
+                print(f"ws_idx: {ws_idx} queue is full. Task created: Resend message " +
+                      f"{message_to_resend.value}, {message_to_resend.timestamp}")
+                # print("len(self.tasks)", len(self.tasks))
+                task = asyncio.create_task(self.resend(ws_idx=ws_idx,
+                                                       message=message_to_resend))
+                self.tasks.add(task)
+
+                # print("queue", queue)
+
+        # for key, value in self.message_queues.items():
+        #     print("key", key, "value", value)
+
+    async def resend(self, ws_idx: int, message: CustomMessage, counter: int = 5):
+        if ws_idx not in self.message_queues:
+            return
+
+        queue = self.message_queues[ws_idx]
+
+        # while True:
+        for c in range(counter):
+            try:
+                # print(f"ws_idx: {ws_idx}, queue.qsize: {queue.qsize()}")
+                # queue.put_nowait(message)
+                # print(f"ws_idx: {ws_idx}, message: {message} resend success. counter: {c}")
+                # print(f"ws_idx: {ws_idx}, message: {message} resend success. ")
+                await asyncio.wait_for(queue.put(message),
+                                       timeout=0.1)
+                return
+            # except asyncio.QueueFull:
+            except asyncio.TimeoutError:
+                print(f"ws_idx: {ws_idx} queue is full. Resend later message: {message}.")
+                await asyncio.sleep(2)
+
+        print(f"ws_idx: {ws_idx} queue is full, message: {message} is dropped.")
+        return
+
 
 manager = WS_Manager()
-
-# value = 0
-myData: Dict[str, int] = defaultdict(int)
-# myData[str(datetime.datetime.now())] = value
-# value += 1
 
 async def producer(manager: WS_Manager):
     value = 0
@@ -129,9 +173,12 @@ async def producer(manager: WS_Manager):
         message = CustomMessage(value=value,
                                 timestamp=str(datetime.datetime.now()),
                                 type="message")
+        # print("message", message)
         await manager.broadcast_to_queues(message)
+        # manager.broadcast_to_queues(message)
         value += 1
         await asyncio.sleep(1)
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -142,6 +189,7 @@ async def startup_event():
 async def index(request: Request):
     return templates.TemplateResponse("index.html",
                                       context={"request": request})
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -154,7 +202,9 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 await websocket.send_json(message.dict())
                 # print("message", message)
-                await asyncio.sleep(2)
+                # print("queue", queue)
+                # await asyncio.sleep(2)
+                await asyncio.sleep(random.randrange(5))
             except (WebSocketDisconnect, websockets.exceptions.ConnectionClosedOK):
                 await manager.remove(websocket)
                 return
@@ -167,6 +217,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 recv = await asyncio.wait_for(websocket.receive_json(),
                                               timeout=0.2)
                 # print("recv", recv)
+                type = recv.get('type')
+                if type != 'pong':
+                    await manager.remove(websocket)
+                    return
 
             except (asyncio.TimeoutError, WebSocketDisconnect, websockets.exceptions.ConnectionClosedOK) as e:
                 await manager.remove(websocket)
